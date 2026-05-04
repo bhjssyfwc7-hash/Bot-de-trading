@@ -20,14 +20,17 @@ logging.basicConfig(
 logger = logging.getLogger("trading_bot")
 
 
+def quiet_console() -> None:
+    """Raise console handler threshold to WARNING so INFO logs don't clutter the dashboard."""
+    for handler in logger.handlers:
+        if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+            handler.setLevel(logging.WARNING)
+
+
 def log_trade(action: str, symbol: str, price: float, qty: float, balance: float) -> None:
     logger.info(
         "TRADE | %-4s | %s | price=%.4f | qty=%.6f | balance=%.2f USDT",
-        action,
-        symbol,
-        price,
-        qty,
-        balance,
+        action, symbol, price, qty, balance,
     )
 
 

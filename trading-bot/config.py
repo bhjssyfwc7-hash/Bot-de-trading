@@ -29,8 +29,8 @@ class Config:
     TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", 0.04))
     INITIAL_BALANCE: float = float(os.getenv("INITIAL_BALANCE", 1000.0))
 
-    # Loop interval in seconds (matches timeframe approximately)
-    LOOP_INTERVAL: int = 60  # Check every 60 seconds in live mode
+    # Loop interval in seconds
+    LOOP_INTERVAL: int = int(os.getenv("LOOP_INTERVAL", 300))  # 5 min default
 
     @classmethod
     def validate(cls) -> None:
