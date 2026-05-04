@@ -17,6 +17,10 @@ from risk import (
     check_exit, is_daily_loss_exceeded,
 )
 from logger import logger, log_trade, quiet_console
+from telegram import (
+    notify_start, notify_buy, notify_sell, notify_take_profit,
+    notify_stop_loss, notify_circuit_breaker, notify_daily_summary,
+)
 
 # ── ANSI palette ──────────────────────────────────────────────────────────────
 _G   = "\033[92m"
@@ -62,6 +66,7 @@ class ScalpingTrader:
         self.daily_start_date     = datetime.now(timezone.utc).date()
         self.paused               = False
         self._pause_reason        = ""
+        self._day_pnls: list[float] = []   # PnL of every trade closed today
 
     # ── Portfolio ─────────────────────────────────────────────────────────────
 
@@ -73,27 +78,45 @@ class ScalpingTrader:
 
     # ── Daily guards ──────────────────────────────────────────────────────────
 
-    def check_daily_reset(self, price: float) -> None:
+    def check_daily_reset(self, price: float) -> "dict | None":
+        """Returns yesterday's summary dict when the day rolls over, else None."""
         today = datetime.now(timezone.utc).date()
         if today != self.daily_start_date:
-            self.daily_start_balance = self.portfolio_value(price)
+            end_pv = self.portfolio_value(price)
+            stats  = {
+                "date":          self.daily_start_date.isoformat(),
+                "trades":        len(self._day_pnls),
+                "wins":          sum(1 for p in self._day_pnls if p > 0),
+                "losses":        sum(1 for p in self._day_pnls if p <= 0),
+                "total_pnl":     sum(self._day_pnls),
+                "start_balance": self.daily_start_balance,
+                "end_balance":   end_pv,
+                "best_trade":    max(self._day_pnls, default=0.0),
+                "worst_trade":   min(self._day_pnls, default=0.0),
+            }
+            self.daily_start_balance = end_pv
             self.daily_start_date    = today
+            self._day_pnls           = []
             if self.paused and "daily" in self._pause_reason:
-                self.paused       = False
+                self.paused        = False
                 self._pause_reason = ""
-                logger.info("Nouveau jour — pause journalière levée. Balance : %.2f USDT",
-                            self.daily_start_balance)
+                logger.info("Nouveau jour — pause levée. Balance : %.2f USDT", end_pv)
+            return stats
+        return None
 
-    def check_daily_loss_limit(self, price: float) -> None:
+    def check_daily_loss_limit(self, price: float) -> bool:
+        """Returns True the first time the daily limit is breached."""
         if not self.paused and is_daily_loss_exceeded(
             self.portfolio_value(price), self.daily_start_balance
         ):
             self.paused        = True
             self._pause_reason = "daily loss limit"
             logger.warning(
-                "Limite journalière atteinte : %.2f%% — bot en PAUSE jusqu'à demain.",
+                "Limite journalière atteinte : %.2f%% — bot en PAUSE.",
                 self.daily_pnl_pct(price) * 100,
             )
+            return True
+        return False
 
     # ── Open / close ──────────────────────────────────────────────────────────
 
@@ -137,6 +160,7 @@ class ScalpingTrader:
         pnl = pos.pnl(price)
         self.balance += pos.qty * price
         self.total_realized_pnl += pnl
+        self._day_pnls.append(pnl)
         if pnl > 0:
             self.wins += 1
         else:
@@ -156,11 +180,13 @@ class ScalpingTrader:
                 closed.append((pos, reason.replace("_", " "), pnl))
         return closed
 
-    def close_all(self, price: float, reason: str = "RSI_SIGNAL") -> float:
-        total = 0.0
+    def close_all(self, price: float, reason: str = "RSI_SIGNAL") -> list[tuple[Position, float]]:
+        """Close every open position. Returns list of (pos, pnl) for notifications."""
+        closed = []
         for pos in list(self.positions):
-            total += self.close_position(pos, price, reason)
-        return total
+            pnl = self.close_position(pos, price, reason)
+            closed.append((pos, pnl))
+        return closed
 
 
 # ── RSI bar ───────────────────────────────────────────────────────────────────
@@ -379,7 +405,11 @@ def run_bot() -> None:
           f"  boucle {config.LOOP_INTERVAL}s")
     print(f"  Balance initiale : ${config.INITIAL_BALANCE:,.2f} USDT")
     print(f"  Source données   : Kraken — lecture seule (aucune clé API)")
+    tg_status = "activées" if config.TELEGRAM_ENABLED else "désactivées (TELEGRAM_TOKEN manquant)"
+    print(f"  Notifications    : Telegram {tg_status}")
     print(f"{_B}{'━' * 58}{_RST}\n")
+
+    notify_start(config.INITIAL_BALANCE)   # 🤖 startup alert
 
     while True:
         try:
@@ -390,12 +420,28 @@ def run_bot() -> None:
             if prev_price is None:
                 prev_price = current_price
 
-            # ── Daily checks ───────────────────────────────────────────────
-            trader.check_daily_reset(current_price)
-            trader.check_daily_loss_limit(current_price)
+            # ── Daily reset + summary ──────────────────────────────────────
+            daily_stats = trader.check_daily_reset(current_price)
+            if daily_stats:
+                notify_daily_summary(daily_stats)          # 📊 midnight
+
+            # ── Circuit breaker ────────────────────────────────────────────
+            just_paused = trader.check_daily_loss_limit(current_price)
+            if just_paused:
+                notify_circuit_breaker(                    # ⚠️ pause
+                    trader.daily_pnl_pct(current_price) * 100,
+                    trader.portfolio_value(current_price),
+                )
 
             # ── SL / TP on all positions ───────────────────────────────────
             closed = trader.check_exits(current_price)
+            for pos, reason, pnl in closed:
+                pv       = trader.portfolio_value(current_price)
+                ret_pct  = (pv - config.INITIAL_BALANCE) / config.INITIAL_BALANCE * 100
+                if reason == "STOP LOSS":
+                    notify_stop_loss(pos, current_price, pnl, pv, ret_pct)   # 🛑
+                else:
+                    notify_take_profit(pos, current_price, pnl, pv, ret_pct) # 🔴 TP
 
             # ── Strategy signal ────────────────────────────────────────────
             ind    = compute_indicators(df)
@@ -411,10 +457,18 @@ def run_bot() -> None:
                     pos = trader.open_position(current_price)
                     if pos:
                         action = "BUY"
+                        notify_buy(                                           # 🟢
+                            pos, current_price, ind["rsi"],
+                            trader.portfolio_value(current_price),
+                        )
 
                 elif signal == SIGNAL_SELL and trader.positions:
-                    trader.close_all(current_price, reason="RSI_SIGNAL")
+                    closed_by_signal = trader.close_all(current_price, reason="RSI_SIGNAL")
                     action = "SELL"
+                    for pos, pnl in closed_by_signal:
+                        pv      = trader.portfolio_value(current_price)
+                        ret_pct = (pv - config.INITIAL_BALANCE) / config.INITIAL_BALANCE * 100
+                        notify_sell(pos, current_price, pnl, "RSI_SIGNAL", pv, ret_pct)  # 🔴
 
             display_dashboard(current_price, prev_price, ind, action, closed, trader)
             prev_price = current_price
