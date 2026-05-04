@@ -57,7 +57,7 @@ def run_backtest(df: pd.DataFrame, initial_balance: float = None) -> dict:
         rsi_now = row["rsi"]
         rsi_prev = prev["rsi"]
 
-        if position == 0 and rsi_prev < config.RSI_OVERSOLD and rsi_now >= config.RSI_OVERSOLD:
+        if position == 0 and rsi_prev >= config.RSI_OVERSOLD and rsi_now < config.RSI_OVERSOLD:
             qty = position_size(balance, price)
             cost = qty * price
             if cost <= balance:
@@ -70,7 +70,7 @@ def run_backtest(df: pd.DataFrame, initial_balance: float = None) -> dict:
                                 "qty": qty, "pnl": 0.0, "balance": balance,
                                 "timestamp": row.name})
 
-        elif position > 0 and rsi_prev > config.RSI_OVERBOUGHT and rsi_now <= config.RSI_OVERBOUGHT:
+        elif position > 0 and rsi_prev <= config.RSI_OVERBOUGHT and rsi_now > config.RSI_OVERBOUGHT:
             pnl = (price - entry_price) * position
             balance += position * price
             trades.append({"type": "SELL", "reason": "RSI_OVERBOUGHT", "price": price,

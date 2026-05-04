@@ -31,11 +31,11 @@ def get_signal(df: pd.DataFrame) -> str:
     last_rsi = df["rsi"].iloc[-1]
     prev_rsi = df["rsi"].iloc[-2]
 
-    # Buy: RSI crosses up from oversold territory
-    if prev_rsi < config.RSI_OVERSOLD and last_rsi >= config.RSI_OVERSOLD:
+    # Buy: RSI crosses INTO oversold zone (drops below 30)
+    if prev_rsi >= config.RSI_OVERSOLD and last_rsi < config.RSI_OVERSOLD:
         signal = SIGNAL_BUY
-    # Sell: RSI crosses down from overbought territory
-    elif prev_rsi > config.RSI_OVERBOUGHT and last_rsi <= config.RSI_OVERBOUGHT:
+    # Sell: RSI crosses INTO overbought zone (rises above 70)
+    elif prev_rsi <= config.RSI_OVERBOUGHT and last_rsi > config.RSI_OVERBOUGHT:
         signal = SIGNAL_SELL
     else:
         signal = SIGNAL_HOLD
